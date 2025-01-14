@@ -8,19 +8,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Обробник збереження налаштувань
-document.getElementById('saveOptions').addEventListener('click', () => {
-  const depth = document.getElementById('depth').value;
-  const pageSize = document.getElementById('pageSize').value;
-  const minSize = document.getElementById('minSize').value;
+document.getElementById('saveOptions').addEventListener('click', async () => {
+  const depth = parseInt(document.getElementById('depth').value);
+  const pageSize = parseInt(document.getElementById('pageSize').value);
+  const minSize = parseInt(document.getElementById('minSize').value);
   const savePath = document.getElementById('savePath').value;
   
-  chrome.storage.sync.set({ depth, pageSize, minSize, savePath }, () => {
-    const status = document.getElementById('status');
-    status.textContent = 'Налаштування збережено';
-    setTimeout(() => {
-      status.textContent = 'Готовий до роботи';
-    }, 2000);
+  // Отримуємо попередні налаштування
+  const oldSettings = await chrome.storage.sync.get(['depth']);
+  
+  await chrome.storage.sync.set({ 
+    depth, 
+    pageSize, 
+    minSize, 
+    savePath 
   });
+  
+  // Скидаємо результати тільки якщо змінилась глибина сканування
+  if (oldSettings.depth !== depth) {
+    await chrome.storage.local.remove(['foundImages']);
+    
+    // Оновлюємо відображення
+    document.getElementById('pagesScanned').textContent = 'Відкрито сторінок: 0';
+    document.getElementById('imagesFound').textContent = 'Знайдено зображень: 0';
+    document.getElementById('progress').style.width = '0%';
+  }
+  
+  const status = document.getElementById('status');
+  status.textContent = 'Налаштування збережено';
+  setTimeout(() => {
+    status.textContent = 'Готовий до роботи';
+  }, 2000);
 });
 
 // Обробник початку сканування
@@ -28,10 +46,11 @@ document.getElementById('startScanning').addEventListener('click', async () => {
   try {
     const settings = await chrome.storage.sync.get(['depth', 'pageSize', 'minSize', 'savePath']);
     
-    if (!settings.depth || !settings.pageSize || !settings.minSize || !settings.savePath) {
-      document.getElementById('status').textContent = 'Помилка: Не всі налаштування задані';
-      return;
-    }
+    // Перевіряємо наявність налаштувань з значеннями за замовчуванням
+    const depth = settings.depth ?? 0;
+    const pageSize = settings.pageSize ?? 1;
+    const minSize = settings.minSize ?? 500;
+    const savePath = settings.savePath ?? 'saved_images';
     
     // Скидаємо прогрес-бар
     document.getElementById('progress').style.width = '0%';
@@ -42,8 +61,8 @@ document.getElementById('startScanning').addEventListener('click', async () => {
       type: 'START_SCAN',
       data: {
         tabId: tabs[0].id,
-        depth: settings.depth,
-        delay: settings.pageSize * 1000
+        depth: depth,
+        delay: pageSize
       }
     });
     
@@ -128,6 +147,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'PREVIEW_UPDATED') {
     document.getElementById('pagesScanned').textContent = `Відкрито сторінок: ${message.data.pages}`;
     document.getElementById('imagesFound').textContent = `Знайдено зображень: ${message.data.images}`;
+    document.getElementById('duplicatesFound').textContent = `Знайдено дублів: ${message.data.duplicates}`;
+    document.getElementById('linksFound').textContent = `Знайдено посилань: ${message.data.links}`;
   }
 });
 
