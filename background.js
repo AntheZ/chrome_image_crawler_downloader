@@ -1,257 +1,305 @@
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.sync.set({ 
-    depth: 0, 
-    pageSize: 1, 
-    minSize: 500,
-    savePath: 'saved_images'
-  });
-});
-
-let totalScannedPages = 0;
-let totalFoundImages = 0;
+let processedPages = 0;
+let savedImages = 0;
+let duplicates = 0;
 let visitedUrls = new Set();
-
-
-// Додайте логіку для обробки зображень та збереження їх у PNG
+let foundImages = new Set();
+let isRunning = false;
+let slowPages = [];
+let pendingUrls = new Set();
+let slowPagesAttempts = new Map();
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function scanPage(tabId, depth, delayTime, minSize, maxParallel = 1) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (visitedUrls.has(tab.url)) {
-      return;
+async function scrollToBottom(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => new Promise((resolve) => {
+      let totalHeight = 0;
+      const distance = 100;
+      const timer = setInterval(() => {
+        const scrollHeight = document.body.scrollHeight;
+        window.scrollBy(0, distance);
+        totalHeight += distance;
+
+        if(totalHeight >= scrollHeight){
+          clearInterval(timer);
+          window.scrollTo(0, 0);
+          resolve();
+        }
+      }, 100);
+    })
+  });
+}
+
+async function getAllImages(tabId) {
+  return chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const images = new Set();
+      
+      // Функція для додавання зображення з перевіркою розміру
+      const addImageIfValid = (url, element) => {
+        // Перевіряємо розмір для img елементів
+        if (element instanceof HTMLImageElement) {
+          if (element.naturalWidth < 100 || element.naturalHeight < 100) {
+            return;
+          }
+        }
+        
+        if (url && url.startsWith('http') && !url.includes('data:image')) {
+          images.add({
+            url: url,
+            filename: url.split('/').pop().split('?')[0]
+          });
+        }
+      };
+
+      // 1. Звичайні img теги
+      document.querySelectorAll('img').forEach(img => {
+        if (img.complete && img.naturalWidth > 0) {
+          addImageIfValid(img.currentSrc || img.src, img);
+        }
+      });
+      
+      // 2. Фонові зображення
+      document.querySelectorAll('*').forEach(el => {
+        const style = window.getComputedStyle(el);
+        const bg = style.backgroundImage;
+        if (bg && bg !== 'none') {
+          const url = bg.replace(/url\(['"]?(.*?)['"]?\)/g, '$1');
+          addImageIfValid(url, el);
+        }
+      });
+      
+      // 3. Атрибути data-*
+      const dataAttributes = ['data-src', 'data-original', 'data-lazy', 'data-srcset', 
+                            'data-zoom', 'data-big', 'data-full', 'data-image'];
+      
+      document.querySelectorAll(`[${dataAttributes.join('], [')}]`).forEach(el => {
+        dataAttributes.forEach(attr => {
+          if (el.dataset[attr.replace('data-', '')]) {
+            addImageIfValid(el.dataset[attr.replace('data-', '')], el);
+          }
+        });
+      });
+
+      // 4. Пошук в iframes
+      document.querySelectorAll('iframe').forEach(iframe => {
+        try {
+          const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+          iframeDoc.querySelectorAll('img').forEach(img => {
+            if (img.complete && img.naturalWidth > 0) {
+              addImageIfValid(img.currentSrc || img.src, img);
+            }
+          });
+        } catch (e) {
+          // Ігноруємо помилки доступу до cross-origin iframes
+        }
+      });
+
+      // 5. Пошук в picture елементах
+      document.querySelectorAll('picture source').forEach(source => {
+        if (source.srcset) {
+          source.srcset.split(',').forEach(src => {
+            const url = src.trim().split(' ')[0];
+            addImageIfValid(url, source);
+          });
+        }
+      });
+
+      // 6. Пошук в атрибутах style
+      document.querySelectorAll('[style*="background"]').forEach(el => {
+        const style = el.getAttribute('style');
+        const matches = style.match(/url\(['"]?(.*?)['"]?\)/g);
+        if (matches) {
+          matches.forEach(match => {
+            const url = match.replace(/url\(['"]?(.*?)['"]?\)/g, '$1');
+            addImageIfValid(url, el);
+          });
+        }
+      });
+
+      // 7. Пошук в JSON-структурах на сторінці
+      document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]')
+        .forEach(script => {
+          try {
+            const data = JSON.parse(script.textContent);
+            const findUrls = (obj) => {
+              if (typeof obj === 'string' && obj.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
+                addImageIfValid(obj, null);
+              } else if (typeof obj === 'object' && obj !== null) {
+                Object.values(obj).forEach(findUrls);
+              }
+            };
+            findUrls(data);
+          } catch (e) {
+            // Ігноруємо помилки парсингу JSON
+          }
+        });
+
+      return Array.from(images);
     }
-    visitedUrls.add(tab.url);
-    
-    await delay(delayTime * 1000);
-    totalScannedPages++;
-    
-    const images = await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      func: getPageImages,
-      args: [minSize]
-    });
+  });
+}
 
-    const existingImages = await chrome.storage.local.get(['foundImages']);
-    const foundImages = new Set(existingImages.foundImages || []);
-    const duplicates = new Set();
+async function processPage(url) {
+  if (!isRunning || visitedUrls.has(url)) return;
+  visitedUrls.add(url);
+  pendingUrls.delete(url);
+  
+  const tab = await chrome.tabs.create({ url, active: true });
+  let isPageLoaded = false;
+  
+  try {
+    const checkPageLoad = async () => {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => document.readyState === 'complete'
+      });
+      return result[0].result;
+    };
 
-    // Підрахунок зображень, які відповідають критеріям
-    const validImages = images[0].result.filter(img => {
-      const imgElement = new Image();
-      imgElement.src = img;
-      return imgElement.naturalWidth >= minSize && imgElement.naturalHeight >= minSize;
-    });
-
-    validImages.forEach(img => {
-      if (foundImages.has(img)) {
-        duplicates.add(img);
-      } else {
-        foundImages.add(img);
+    for (let i = 0; i < 4; i++) {
+      if (await checkPageLoad()) {
+        isPageLoaded = true;
+        break;
       }
-    });
+      await delay(500);
+    }
 
-    totalFoundImages = foundImages.size;
-    const validImageCount = validImages.length; // Кількість зображень, що відповідають критеріям
+    if (!isPageLoaded) {
+      throw new Error('Page load timeout');
+    }
 
-    await chrome.storage.local.set({ foundImages: Array.from(foundImages) });
-    updatePreview(totalScannedPages, totalFoundImages, duplicates.size, validImageCount); // Передаємо кількість валідних зображень
+    await delay(1000);
+    await scrollToBottom(tab.id);
+    const images = await getAllImages(tab.id);
+    
+    const domain = new URL(url).hostname;
+    
+    for (const imageData of images[0].result) {
+      if (!foundImages.has(imageData.url)) {
+        foundImages.add(imageData.url);
+        const filename = `${domain}/${imageData.filename}`;
+        
+        try {
+          const exists = await new Promise(resolve => {
+            chrome.downloads.search({
+              filename: filename,
+              exists: true
+            }, results => {
+              resolve(results.length > 0);
+            });
+          });
+          
+          if (!exists) {
+            await chrome.downloads.download({
+              url: imageData.url,
+              filename: filename,
+              saveAs: false
+            });
+            savedImages++;
+          } else {
+            duplicates++;
+          }
+        } catch (error) {
+          console.error('Error checking file:', error);
+        }
+      } else {
+        duplicates++;
+      }
+    }
+    
+    processedPages++;
+    updateStats();
 
     const links = await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      function: getPageLinks
+      target: { tabId: tab.id },
+      func: () => Array.from(document.querySelectorAll('a'))
+        .map(a => a.href)
+        .filter(url => url.startsWith(window.location.origin))
     });
 
-    const existingLinks = new Set();
-    links[0].result.forEach(link => {
-      existingLinks.add(link);
-    });
+    for (const link of links[0].result) {
+      if (!visitedUrls.has(link) && !pendingUrls.has(link)) {
+        pendingUrls.add(link);
+      }
+    }
 
-    const totalLinks = existingLinks.size;
-    updatePreview(totalScannedPages, totalFoundImages, duplicates.size, totalLinks);
+    await chrome.tabs.remove(tab.id);
 
-    // Продовжуємо сканування якщо глибина > 0
-    if (depth > 0) {
-      const newLinks = links[0].result.filter(link => !visitedUrls.has(link));
-      const chunks = chunk(newLinks, maxParallel);
-      
-      for (const linkChunk of chunks) {
-        await Promise.all(linkChunk.map(async (link) => {
-          try {
-            const newTab = await chrome.tabs.create({ url: link, active: false });
-            await scanPage(newTab.id, depth - 1, delayTime, minSize, maxParallel);
-            await chrome.tabs.remove(newTab.id);
-          } catch (error) {
-            console.error(`Помилка при обробці посилання ${link}:`, error);
-          }
-        }));
+    if (isRunning) {
+      const nextUrl = Array.from(pendingUrls)[0];
+      if (nextUrl) {
+        await processPage(nextUrl);
+      } else if (slowPages.length > 0) {
+        const slowUrl = slowPages.shift();
+        await processPage(slowUrl);
       }
     }
   } catch (error) {
-    console.error('Помилка при скануванні сторінки:', error);
-  }
-}
-
-function chunk(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function getPageImages(minSize) {
-  const imgSources = Array.from(document.querySelectorAll('img')).filter(img => {
-    return img.naturalWidth >= minSize && img.naturalHeight >= minSize;
-  }).map(img => img.src);
-
-  const backgroundImages = Array.from(document.querySelectorAll('*')).reduce((acc, element) => {
-    const style = window.getComputedStyle(element);
-    const backgroundImage = style.backgroundImage;
-    if (backgroundImage && backgroundImage !== 'none') {
-      const url = backgroundImage.match(/url\(['"]?([^'"]+)['"]?\)/);
-      if (url) acc.push(url[1]);
+    console.error('Error or timeout processing page:', error);
+    if (!slowPagesAttempts.has(url)) {
+      slowPagesAttempts.set(url, 1);
+      slowPages.push(url);
+    } else if (slowPagesAttempts.get(url) < 3) {
+      slowPagesAttempts.set(url, slowPagesAttempts.get(url) + 1);
+      slowPages.push(url);
     }
-    return acc;
-  }, []).filter(url => {
-    const img = new Image();
-    img.src = url;
-    return img.naturalWidth >= minSize && img.naturalHeight >= minSize;
-  });
-  
-  // Збираємо всі зображення з атрибуту srcset
-  const srcsetImages = Array.from(document.querySelectorAll('img[srcset]')).reduce((acc, img) => {
-    const srcset = img.srcset;
-    const urls = srcset.match(/([^\s,]+)/g);
-    if (urls) acc.push(...urls.filter(url => !url.includes(' ')));
-    return acc;
-  }, []);
-  
-  // Збираємо всі зображення з picture елементів
-  const pictureImages = Array.from(document.querySelectorAll('picture source')).reduce((acc, source) => {
-    if (source.srcset) {
-      const urls = source.srcset.match(/([^\s,]+)/g);
-      if (urls) acc.push(...urls.filter(url => !url.includes(' ')));
-    }
-    return acc;
-  }, []);
-  
-  // Збираємо зображення, які з'являються при hover
-  const hoverImages = Array.from(document.querySelectorAll('*')).reduce((acc, element) => {
-    const hoverStyle = window.getComputedStyle(element, ':hover');
-    const hoverBackgroundImage = hoverStyle.backgroundImage;
-    if (hoverBackgroundImage && hoverBackgroundImage !== 'none') {
-      const url = hoverBackgroundImage.match(/url\(['"]?([^'"]+)['"]?\)/);
-      if (url) acc.push(url[1]);
-    }
-    return acc;
-  }, []);
-  
-  // Об'єднуємо всі знайдені URL та видаляємо дублікати
-  return [...new Set([...imgSources, ...backgroundImages, ...srcsetImages, ...pictureImages, ...hoverImages])];
-}
-
-function isSameDomain(url, baseDomain) {
-  try {
-    const urlObj = new URL(url);
-    return urlObj.hostname === baseDomain;
-  } catch {
-    return false;
-  }
-}
-
-function getPageLinks() {
-  const baseDomain = window.location.hostname;
-  const links = new Set();
-  
-  // Отримуємо всі посилання зі сторінки
-  document.querySelectorAll('a').forEach(a => {
-    try {
-      const url = new URL(a.href);
-      // Перевіряємо, що посилання веде на той самий домен
-      if (url.hostname === baseDomain && 
-          // Виключаєємо якорі та поточну сторінку
-          url.pathname !== window.location.pathname && 
-          !url.hash && 
-          // Перевіряємо розширення файлу
-          !/\.(jpg|jpeg|png|gif|pdf|doc|docx)$/i.test(url.pathname)) {
-        links.add(a.href);
+    await chrome.tabs.remove(tab.id);
+    
+    if (isRunning) {
+      const nextUrl = Array.from(pendingUrls)[0];
+      if (nextUrl) {
+        await processPage(nextUrl);
       }
-    } catch (e) {
-      // Ігноруємо невалідні URL
     }
-  });
-  
-  return Array.from(links);
+  }
 }
 
-async function downloadAndConvertImage(src, basePath) {
-  try {
-    // Отримуємо домен з URL зображення
-    const urlObj = new URL(src);
-    const domain = urlObj.hostname;
-    
-    // Отримуємо оригінальну назву файлу
-    const originalName = src.split('/').pop().split('?')[0] || 'image.png';
-    
-    // Створюємо шлях: saved_images/domain.com/original_name
-    const savePath = `saved_images/${domain}`;
-    const filename = `${savePath}/${originalName}`;
-    
-    await chrome.downloads.download({
-      url: src, // Використовуємо оригінальний URL замість blob
-      filename: filename,
-      saveAs: false
-    });
-  } catch (error) {
-    console.error(`Помилка при завантаженні зображення ${src}:`, error);
-    throw error;
-  }
+function updateStats() {
+  chrome.runtime.sendMessage({
+    type: 'STATS_UPDATE',
+    data: {
+      pages: processedPages,
+      images: savedImages,
+      duplicates: duplicates
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'START_SCAN') {
-    (async () => {
-      try {
-        totalScannedPages = 0;
-        totalFoundImages = 0;
-        visitedUrls = new Set();
-        
-        const settings = await chrome.storage.sync.get(['minSize']);
-        const minSize = settings.minSize || 500;
-
-        await scanPage(
-          message.data.tabId, 
-          parseInt(message.data.depth), 
-          parseInt(message.data.delay),
-          minSize
-        );
-      } catch (error) {
-        console.error('Помилка при скануванні:', error);
-      }
-    })();
+  if (message.type === 'START_CRAWLING') {
+    processedPages = 0;
+    savedImages = 0;
+    duplicates = 0;
+    visitedUrls = new Set();
+    foundImages = new Set();
+    pendingUrls = new Set();
+    slowPages = [];
+    slowPagesAttempts = new Map();
+    isRunning = true;
+    processPage(message.url);
+  } else if (message.type === 'STOP_CRAWLING') {
+    isRunning = false;
+    // Очищаємо всі дані
+    visitedUrls = new Set();
+    foundImages = new Set();
+    pendingUrls = new Set();
+    slowPages = [];
+    slowPagesAttempts = new Map();
   }
-  
-  if (message.type === 'DOWNLOAD_IMAGE') {
-    (async () => {
-      try {
-        await downloadAndConvertImage(message.data.src, message.data.savePath);
-      } catch (error) {
-        console.error('Помилка при завантаженні:', error);
-      }
-    })();
-  }
-  
-  // Повертаємо true для підтримки асинхронних відповідей
-  return true;
 });
 
-function updatePreview(pages, images, duplicates = 0, links = 0, validImagesCount = 0) {
-  chrome.runtime.sendMessage({
-    type: 'PREVIEW_UPDATED',
-    data: { pages, images, duplicates, links, validImagesCount }
+chrome.action.onClicked.addListener(async (tab) => {
+  const window = await chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html'),
+    type: 'popup',
+    state: 'maximized'
   });
-}
+
+  // Зберігаємо поточну вкладку для подальшого використання
+  chrome.storage.local.set({ currentTab: tab });
+});
