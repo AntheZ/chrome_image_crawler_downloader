@@ -6,8 +6,10 @@
     "activeTab",
     "storage",
     "downloads",
-    "scripting",
-    "<all_urls>"
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*/*"
   ],
   "background": {
     "service_worker": "background.js"
