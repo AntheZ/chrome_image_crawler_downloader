@@ -12,25 +12,30 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function scanPage(tabId, depth, maxParallel = 1) {
+async function scanPage(tabId, depth, delayTime, maxParallel = 1) {
   try {
-    // Додаємо затримку перед скануванням кожної сторінки
-    await delay(10000); // 10 секунд затримки
+    await delay(delayTime);
     
     totalScannedPages++;
+    const settings = await chrome.storage.sync.get(['minSize']);
     const images = await chrome.scripting.executeScript({
       target: { tabId: tabId },
-      function: getPageImages
+      func: getPageImages,
+      args: [settings.minSize]
     });
 
-    const uniqueImages = new Set(images[0].result.map(img => img.src));
-    totalFoundImages += uniqueImages.size;
-    
+    if (!images || !images[0] || !images[0].result) {
+      console.warn('Не вдалося отримати зображення зі сторінки');
+      return;
+    }
+
     // Зберігаємо знайдені зображення
     const existingImages = await chrome.storage.local.get(['foundImages']);
-    const foundImages = existingImages.foundImages || [];
-    foundImages.push(...Array.from(uniqueImages));
-    await chrome.storage.local.set({ foundImages });
+    const foundImages = new Set(existingImages.foundImages || []);
+    images[0].result.forEach(img => foundImages.add(img.src));
+    
+    totalFoundImages = foundImages.size;
+    await chrome.storage.local.set({ foundImages: Array.from(foundImages) });
     
     updatePreview(totalScannedPages, totalFoundImages);
 
@@ -40,17 +45,19 @@ async function scanPage(tabId, depth, maxParallel = 1) {
         function: getPageLinks
       });
 
-      const chunks = chunk(links[0].result, maxParallel);
-      for (const linkChunk of chunks) {
-        await Promise.all(linkChunk.map(async (link) => {
-          try {
-            const newTab = await chrome.tabs.create({ url: link, active: false });
-            await scanPage(newTab.id, depth - 1, maxParallel);
-            await chrome.tabs.remove(newTab.id);
-          } catch (error) {
-            console.error(`Помилка при обробці посилання ${link}:`, error);
-          }
-        }));
+      if (links && links[0] && links[0].result) {
+        const chunks = chunk(links[0].result, maxParallel);
+        for (const linkChunk of chunks) {
+          await Promise.all(linkChunk.map(async (link) => {
+            try {
+              const newTab = await chrome.tabs.create({ url: link, active: false });
+              await scanPage(newTab.id, depth - 1, delayTime, maxParallel);
+              await chrome.tabs.remove(newTab.id);
+            } catch (error) {
+              console.error(`Помилка при обробці посилання ${link}:`, error);
+            }
+          }));
+        }
       }
     }
   } catch (error) {
@@ -66,12 +73,12 @@ function chunk(array, size) {
   return chunks;
 }
 
-function getPageImages() {
+function getPageImages(minSize) {
   return Array.from(document.querySelectorAll('img')).map(img => ({
     src: img.src,
     width: img.naturalWidth,
     height: img.naturalHeight
-  })).filter(img => img.width >= 500 || img.height >= 500);
+  })).filter(img => img.width >= minSize || img.height >= minSize);
 }
 
 function isSameDomain(url, baseDomain) {
@@ -90,17 +97,21 @@ function getPageLinks() {
     .filter(url => isSameDomain(url, baseDomain));
 }
 
-async function downloadAndConvertImage(src, savePath) {
+async function downloadAndConvertImage(src, basePath) {
   try {
-    const response = await fetch(src);
-    if (!response.ok) {
-      throw new Error(`HTTP помилка! статус: ${response.status}`);
-    }
-    const blob = await response.blob();
+    // Отримуємо домен з URL зображення
+    const urlObj = new URL(src);
+    const domain = urlObj.hostname;
     
-    const filename = `${savePath}/${Date.now()}.png`;
+    // Отримуємо оригінальну назву файлу
+    const originalName = src.split('/').pop().split('?')[0] || 'image.png';
+    
+    // Створюємо шлях: saved_images/domain.com/original_name
+    const savePath = `saved_images/${domain}`;
+    const filename = `${savePath}/${originalName}`;
+    
     await chrome.downloads.download({
-      url: URL.createObjectURL(blob),
+      url: src, // Використовуємо оригінальний URL замість blob
       filename: filename,
       saveAs: false
     });
@@ -110,19 +121,34 @@ async function downloadAndConvertImage(src, savePath) {
   }
 }
 
-chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_SCAN') {
-    await scanPage(message.data.tabId, message.data.depth);
-  }
-  if (message.type === 'UPDATE_PREVIEW') {
-    chrome.runtime.sendMessage({
-      type: 'PREVIEW_UPDATED',
-      data: {
-        pages: totalScannedPages,
-        images: totalFoundImages
+    // Запускаємо сканування в окремому асинхронному контексті
+    (async () => {
+      try {
+        await scanPage(
+          message.data.tabId, 
+          parseInt(message.data.depth), 
+          parseInt(message.data.delay)
+        );
+      } catch (error) {
+        console.error('Помилка при скануванні:', error);
       }
-    });
+    })();
   }
+  
+  if (message.type === 'DOWNLOAD_IMAGE') {
+    (async () => {
+      try {
+        await downloadAndConvertImage(message.data.src, message.data.savePath);
+      } catch (error) {
+        console.error('Помилка при завантаженні:', error);
+      }
+    })();
+  }
+  
+  // Повертаємо true для підтримки асинхронних відповідей
+  return true;
 });
 
 function updatePreview(pages, images) {

@@ -2,9 +2,9 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const settings = await chrome.storage.sync.get(['depth', 'pageSize', 'minSize', 'savePath']);
   document.getElementById('depth').value = settings.depth || 0;
-  document.getElementById('pageSize').value = settings.pageSize || 1;
+  document.getElementById('pageSize').value = settings.pageSize || 10;
   document.getElementById('minSize').value = settings.minSize || 500;
-  document.getElementById('savePath').value = settings.savePath || 'downloads/images';
+  document.getElementById('savePath').value = settings.savePath || 'saved_images';
 });
 
 // Обробник збереження налаштувань
@@ -32,11 +32,6 @@ document.getElementById('startScanning').addEventListener('click', async () => {
       document.getElementById('status').textContent = 'Помилка: Не всі налаштування задані';
       return;
     }
-
-    // Очищаємо попередні результати
-    await chrome.storage.local.remove(['foundImages']);
-    totalScannedPages = 0;
-    totalFoundImages = 0;
     
     // Скидаємо прогрес-бар
     document.getElementById('progress').style.width = '0%';
@@ -47,7 +42,8 @@ document.getElementById('startScanning').addEventListener('click', async () => {
       type: 'START_SCAN',
       data: {
         tabId: tabs[0].id,
-        depth: settings.depth
+        depth: settings.depth,
+        delay: settings.pageSize * 1000
       }
     });
     
@@ -74,10 +70,19 @@ document.getElementById('saveImages').addEventListener('click', async () => {
     for (let i = 0; i < images.foundImages.length; i++) {
       status.textContent = `Збереження ${i + 1} з ${images.foundImages.length}`;
       progress.style.width = `${((i + 1) / images.foundImages.length) * 100}%`;
-      await downloadAndConvertImage(images.foundImages[i], settings.savePath);
+      
+      // Замість прямого виклику функції відправляємо повідомлення в background
+      await chrome.runtime.sendMessage({
+        type: 'DOWNLOAD_IMAGE',
+        data: {
+          src: images.foundImages[i],
+          savePath: settings.savePath
+        }
+      });
     }
     
     status.textContent = 'Збереження завершено';
+    document.getElementById('openFolder').disabled = false;
   } catch (error) {
     document.getElementById('status').textContent = `Помилка: ${error.message}`;
   }
@@ -85,9 +90,7 @@ document.getElementById('saveImages').addEventListener('click', async () => {
 
 document.getElementById('browsePath').addEventListener('click', () => {
   const savePath = document.getElementById('savePath');
-  const currentPath = savePath.value;
   
-  // Створюємо діалог вибору
   const dialog = document.createElement('div');
   dialog.style.cssText = `
     position: absolute;
@@ -97,30 +100,17 @@ document.getElementById('browsePath').addEventListener('click', () => {
     border: 1px solid #ddd;
     border-radius: 4px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 10px;
     z-index: 1000;
   `;
   
-  const paths = [
-    'downloads/images',
-    'downloads/pictures',
-    'downloads/photos',
-    'downloads/web_images'
-  ];
-  
-  paths.forEach(path => {
-    const option = document.createElement('div');
-    option.style.cssText = `
-      padding: 8px 15px;
-      cursor: pointer;
-      hover: background-color: #f5f5f5;
-    `;
-    option.textContent = path;
-    option.onclick = () => {
-      savePath.value = path;
-      dialog.remove();
-    };
-    dialog.appendChild(option);
-  });
+  dialog.innerHTML = `
+    <p style="margin: 0 0 10px 0;">Зображення будуть збережені в:</p>
+    <code>downloads/saved_images/[domain]/[original_name]</code>
+    <p style="margin: 10px 0 0 0; font-size: 12px; color: #666;">
+      Ви можете переглянути збережені зображення у вашій папці завантажень Chrome
+    </p>
+  `;
   
   document.body.appendChild(dialog);
   
@@ -138,5 +128,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'PREVIEW_UPDATED') {
     document.getElementById('pagesScanned').textContent = `Відкрито сторінок: ${message.data.pages}`;
     document.getElementById('imagesFound').textContent = `Знайдено зображень: ${message.data.images}`;
+  }
+});
+
+// Додати після обробника saveImages
+document.getElementById('openFolder').addEventListener('click', async () => {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'OPEN_IMAGES_FOLDER'
+    });
+  } catch (error) {
+    document.getElementById('status').textContent = `Помилка: ${error.message}`;
   }
 });
