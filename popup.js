@@ -146,7 +146,7 @@ document.getElementById('browsePath').addEventListener('click', () => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'PREVIEW_UPDATED') {
     document.getElementById('pagesScanned').textContent = `Відкрито сторінок: ${message.data.pages}`;
-    document.getElementById('imagesFound').textContent = `Знайдено зображень: ${message.data.images}`;
+    document.getElementById('imagesFound').textContent = `Знайдено зображень: ${message.data.images} з них відповідає критеріям по розмірах: ${message.data.validImagesCount}`;
     document.getElementById('duplicatesFound').textContent = `Знайдено дублів: ${message.data.duplicates}`;
     document.getElementById('linksFound').textContent = `Знайдено посилань: ${message.data.links}`;
   }

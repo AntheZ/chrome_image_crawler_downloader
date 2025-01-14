@@ -18,7 +18,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function scanPage(tabId, depth, delayTime, maxParallel = 1) {
+async function scanPage(tabId, depth, delayTime, minSize, maxParallel = 1) {
   try {
     const tab = await chrome.tabs.get(tabId);
     if (visitedUrls.has(tab.url)) {
@@ -39,7 +39,14 @@ async function scanPage(tabId, depth, delayTime, maxParallel = 1) {
     const foundImages = new Set(existingImages.foundImages || []);
     const duplicates = new Set();
 
-    images[0].result.forEach(img => {
+    // Підрахунок зображень, які відповідають критеріям
+    const validImages = images[0].result.filter(img => {
+      const imgElement = new Image();
+      imgElement.src = img;
+      return imgElement.naturalWidth >= minSize && imgElement.naturalHeight >= minSize;
+    });
+
+    validImages.forEach(img => {
       if (foundImages.has(img)) {
         duplicates.add(img);
       } else {
@@ -48,8 +55,10 @@ async function scanPage(tabId, depth, delayTime, maxParallel = 1) {
     });
 
     totalFoundImages = foundImages.size;
+    const validImageCount = validImages.length; // Кількість зображень, що відповідають критеріям
+
     await chrome.storage.local.set({ foundImages: Array.from(foundImages) });
-    updatePreview(totalScannedPages, totalFoundImages, duplicates.size);
+    updatePreview(totalScannedPages, totalFoundImages, duplicates.size, validImageCount); // Передаємо кількість валідних зображень
 
     const links = await chrome.scripting.executeScript({
       target: { tabId: tabId },
@@ -73,7 +82,7 @@ async function scanPage(tabId, depth, delayTime, maxParallel = 1) {
         await Promise.all(linkChunk.map(async (link) => {
           try {
             const newTab = await chrome.tabs.create({ url: link, active: false });
-            await scanPage(newTab.id, depth - 1, delayTime, maxParallel);
+            await scanPage(newTab.id, depth - 1, delayTime, minSize, maxParallel);
             await chrome.tabs.remove(newTab.id);
           } catch (error) {
             console.error(`Помилка при обробці посилання ${link}:`, error);
@@ -211,10 +220,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         totalFoundImages = 0;
         visitedUrls = new Set();
         
+        const settings = await chrome.storage.sync.get(['minSize']);
+        const minSize = settings.minSize || 500;
+
         await scanPage(
           message.data.tabId, 
           parseInt(message.data.depth), 
-          parseInt(message.data.delay)
+          parseInt(message.data.delay),
+          minSize
         );
       } catch (error) {
         console.error('Помилка при скануванні:', error);
@@ -236,9 +249,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-function updatePreview(pages, images, duplicates = 0, links = 0) {
+function updatePreview(pages, images, duplicates = 0, links = 0, validImagesCount = 0) {
   chrome.runtime.sendMessage({
     type: 'PREVIEW_UPDATED',
-    data: { pages, images, duplicates, links }
+    data: { pages, images, duplicates, links, validImagesCount }
   });
 }
