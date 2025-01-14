@@ -2,6 +2,22 @@
 <html>
 <head>
   <title>Image Saver</title>
+  <style>
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background-color: #f0f0f0;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+    .progress {
+      width: 0%;
+      height: 100%;
+      background-color: #4CAF50;
+      border-radius: 4px;
+      transition: width 0.3s ease-in-out;
+    }
+  </style>
 </head>
 <body>
   <h1>Image Saver</h1>
@@ -9,9 +25,12 @@
     <p id="pagesScanned">Відкрито сторінок: 0</p>
     <p id="imagesFound">Знайдено зображень: 0</p>
   </div>
-  <button id="startSaving">Почати збереження</button>
-  <button id="saveImages">Зберегти зображення</button>
-  <button id="scanImages">Сканувати зображення</button>
+  <div class="progress-bar">
+    <div id="progress" class="progress"></div>
+  </div>
+  <p id="status">Готовий до роботи</p>
+  <button id="startScanning">Почати пошук зображень</button>
+  <button id="saveImages">Зберегти знайдені зображення</button>
   <script src="popup.js"></script>
 </body>
 </html>

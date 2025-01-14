@@ -6,6 +6,7 @@
     "activeTab",
     "storage",
     "downloads",
+    "scripting",
     "<all_urls>"
   ],
   "background": {
