@@ -1,15 +1,74 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>Image Saver</title>
   <style>
+    body {
+      min-width: 800px;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background-color: #f5f5f5;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .left-column, .right-column {
+      padding: 15px;
+    }
+
+    .left-column {
+      border-right: 1px solid #eee;
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+
+    .settings-group {
+      margin-bottom: 20px;
+      padding: 15px;
+      background-color: #f9f9f9;
+      border-radius: 4px;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      color: #666;
+    }
+
+    input {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+
     .progress-bar {
       width: 100%;
       height: 20px;
       background-color: #f0f0f0;
       border-radius: 4px;
-      margin: 10px 0;
+      margin: 15px 0;
+      overflow: hidden;
     }
+
     .progress {
       width: 0%;
       height: 100%;
@@ -17,20 +76,90 @@
       border-radius: 4px;
       transition: width 0.3s ease-in-out;
     }
+
+    #status {
+      text-align: center;
+      color: #666;
+      margin: 10px 0;
+    }
+
+    .preview {
+      text-align: center;
+      margin: 15px 0;
+      padding: 10px;
+      background-color: #e8f5e9;
+      border-radius: 4px;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      margin: 5px 0;
+      border: none;
+      border-radius: 4px;
+      background-color: #4CAF50;
+      color: white;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+
+    button:hover {
+      background-color: #45a049;
+    }
+
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
-  <h1>Image Saver</h1>
-  <div id="preview">
-    <p id="pagesScanned">Відкрито сторінок: 0</p>
-    <p id="imagesFound">Знайдено зображень: 0</p>
+  <div class="container">
+    <div class="left-column">
+      <h2>Налаштування</h2>
+      <div class="settings-group">
+        <div class="form-group">
+          <label for="depth">Глибина сканування:</label>
+          <input type="number" id="depth" min="0" max="10" value="0">
+        </div>
+        
+        <div class="form-group">
+          <label for="pageSize">Затримка між сторінками (секунд):</label>
+          <input type="number" id="pageSize" min="1" value="10">
+        </div>
+        
+        <div class="form-group">
+          <label for="minSize">Мінімальний розмір зображень (px):</label>
+          <input type="number" id="minSize" min="500" value="500">
+        </div>
+        
+        <div class="form-group">
+          <label for="savePath">Шлях для збереження:</label>
+          <div style="display: flex; gap: 10px;">
+            <input type="text" id="savePath" value="downloads/images" style="flex: 1;">
+            <button id="browsePath" style="width: auto; padding: 8px 15px;">Огляд</button>
+          </div>
+        </div>
+
+        <button id="saveOptions">Зберегти налаштування</button>
+      </div>
+    </div>
+    
+    <div class="right-column">
+      <h2>Результати</h2>
+      <div class="preview">
+        <p id="pagesScanned">Відкрито сторінок: 0</p>
+        <p id="imagesFound">Знайдено зображень: 0</p>
+      </div>
+      <div class="progress-bar">
+        <div id="progress" class="progress"></div>
+      </div>
+      <p id="status">Готовий до роботи</p>
+      <button id="startScanning">Почати пошук зображень</button>
+      <button id="saveImages">Зберегти знайдені зображення</button>
+    </div>
   </div>
-  <div class="progress-bar">
-    <div id="progress" class="progress"></div>
-  </div>
-  <p id="status">Готовий до роботи</p>
-  <button id="startScanning">Почати пошук зображень</button>
-  <button id="saveImages">Зберегти знайдені зображення</button>
+  
   <script src="popup.js"></script>
 </body>
 </html>

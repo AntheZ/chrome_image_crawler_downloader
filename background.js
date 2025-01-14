@@ -2,10 +2,21 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.sync.set({ depth: 0, pageSize: 1, minSize: 500 });
 });
 
+let totalScannedPages = 0;
+let totalFoundImages = 0;
+
+
 // Додайте логіку для обробки зображень та збереження їх у PNG
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function scanPage(tabId, depth, maxParallel = 1) {
   try {
+    // Додаємо затримку перед скануванням кожної сторінки
+    await delay(10000); // 10 секунд затримки
+    
     totalScannedPages++;
     const images = await chrome.scripting.executeScript({
       target: { tabId: tabId },
@@ -86,34 +97,37 @@ async function downloadAndConvertImage(src, savePath) {
       throw new Error(`HTTP помилка! статус: ${response.status}`);
     }
     const blob = await response.blob();
-    const img = new Image();
     
-    return new Promise((resolve, reject) => {
-      img.onerror = () => reject(new Error('Помилка завантаження зображення'));
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-        canvas.toBlob(async (newBlob) => {
-          try {
-            const url = URL.createObjectURL(newBlob);
-            const fileName = `${savePath}/${src.split('/').pop().split('?')[0]}.png`;
-            await chrome.downloads.download({
-              url: url,
-              filename: fileName
-            });
-            URL.revokeObjectURL(url);
-            resolve();
-          } catch (error) {
-            reject(error);
-          }
-        }, 'image/png');
-      };
-      img.src = URL.createObjectURL(blob);
+    const filename = `${savePath}/${Date.now()}.png`;
+    await chrome.downloads.download({
+      url: URL.createObjectURL(blob),
+      filename: filename,
+      saveAs: false
     });
   } catch (error) {
-    console.error(`Помилка при обробці зображення ${src}:`, error);
+    console.error(`Помилка при завантаженні зображення ${src}:`, error);
+    throw error;
   }
+}
+
+chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
+  if (message.type === 'START_SCAN') {
+    await scanPage(message.data.tabId, message.data.depth);
+  }
+  if (message.type === 'UPDATE_PREVIEW') {
+    chrome.runtime.sendMessage({
+      type: 'PREVIEW_UPDATED',
+      data: {
+        pages: totalScannedPages,
+        images: totalFoundImages
+      }
+    });
+  }
+});
+
+function updatePreview(pages, images) {
+  chrome.runtime.sendMessage({
+    type: 'PREVIEW_UPDATED',
+    data: { pages, images }
+  });
 }
